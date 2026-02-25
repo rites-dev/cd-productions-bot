@@ -21,9 +21,10 @@ async function askPerplexity(prompt) {
   const url = 'https://api.perplexity.ai/chat/completions'; // correct endpoint[web:129][web:222]
 
   const headers = {
-    Authorization: `Bearer ${PPLX_API_KEY}`,
-    'Content-Type': 'application/json',
-  };
+  Authorization: `Bearer ${PPLX_API_KEY}`,
+  'Content-Type': 'application/json',
+};
+
 
   const data = {
     model: 'sonar', // valid Perplexity chat model[web:129][web:126]
