@@ -11,7 +11,7 @@ app.use(bodyParser.json());
 
 const PPLX_API_KEY = process.env.PPLX_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+const TELEGRAM_API = `https://api.telegram.org/bot$8732199574:AAH9cV7QriantDMtrPbYSENp7CEUZkVtLcg`;
 
 // Simple in-memory store; replace with a real DB later if you want
 const savedFiles = [];
