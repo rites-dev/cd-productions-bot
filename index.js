@@ -371,10 +371,6 @@ async function getOneDriveAccessToken() {
 
 async function uploadFileToOneDrive(localPath, remoteFileName) {
   try {
-    if (!ONEDRIVE_USER) {
-      throw new Error("ONEDRIVE_USER not set");
-    }
-
     const token = await getOneDriveAccessToken();
     const fileBuffer = fs.readFileSync(localPath);
 
