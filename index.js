@@ -278,7 +278,6 @@ async function askPerplexity(prompt) {
 // ----- Telegram file download helper -----
 
 async function downloadTelegramFile(fileId, suggestedName) {
-  // Step 1: getFile to obtain file_path
   const getFileUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`;
 
   const metaRes = await fetch(getFileUrl);
@@ -289,12 +288,11 @@ async function downloadTelegramFile(fileId, suggestedName) {
     throw new Error("Failed to get file_path from Telegram");
   }
 
-  const filePath = meta.result.file_path; // e.g. "documents/file_1234.pdf"
+  const filePath = meta.result.file_path;
   const downloadUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`;
 
   console.log("Downloading Telegram file from:", downloadUrl);
 
-  // Step 2: download the file as binary
   const fileRes = await fetch(downloadUrl);
   if (!fileRes.ok) {
     throw new Error(
@@ -304,14 +302,12 @@ async function downloadTelegramFile(fileId, suggestedName) {
 
   const buffer = await fileRes.buffer();
 
-  // Step 3: save to DATA_DIR
   const safeName = suggestedName.replace(/[^\w.\-]/g, "_");
   const localPath = path.join(DATA_DIR, safeName);
 
   fs.writeFileSync(localPath, buffer);
   console.log("Saved Telegram file to:", localPath);
 
-  // Optional: mirror to OneDrive if configured
   if (ONEDRIVE_CLIENT_ID && ONEDRIVE_TENANT_ID && ONEDRIVE_CLIENT_SECRET) {
     await uploadFileToOneDrive(localPath, safeName);
   }
@@ -341,7 +337,13 @@ async function getOneDriveAccessToken() {
 
   const data = await res.json();
   if (!res.ok) {
-    console.error("OneDrive token error:", data);
+    console.error(
+      "OneDrive token error:",
+      JSON.stringify(data, null, 2),
+      "status:",
+      res.status,
+      res.statusText
+    );
     throw new Error("Failed to get OneDrive token");
   }
   return data.access_token;
@@ -365,7 +367,13 @@ async function uploadFileToOneDrive(localPath, remoteFileName) {
 
     const data = await res.json();
     if (!res.ok) {
-      console.error("OneDrive upload error:", data);
+      console.error(
+        "OneDrive upload error:",
+        JSON.stringify(data, null, 2),
+        "status:",
+        res.status,
+        res.statusText
+      );
     } else {
       console.log("Uploaded to OneDrive:", data.name);
     }
