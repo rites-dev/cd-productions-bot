@@ -35,13 +35,18 @@ console.log("SERVER_URL:", SERVER_URL);
 const app = express();
 app.use(express.json());
 
+// Health check endpoint (used by Railway healthcheck and cron/uptime pings)
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 // Webhook config
 const WEBHOOK_PATH = `/webhook/${TELEGRAM_BOT_TOKEN}`;
 const WEBHOOK_URL = `${SERVER_URL}${WEBHOOK_PATH}`;
 
 console.log("Webhook will be set to:", WEBHOOK_URL);
 
-// Health check
+// Root check
 app.get("/", (req, res) => {
   res.send("Telegram + Perplexity bot is running");
 });
@@ -50,6 +55,9 @@ app.get("/", (req, res) => {
 app.post(WEBHOOK_PATH, async (req, res) => {
   try {
     const update = req.body;
+
+    // Temporary logging of all incoming updates
+    console.log("Incoming Telegram update:", JSON.stringify(update));
 
     if (!update.message || !update.message.text) {
       return res.sendStatus(200);
@@ -109,7 +117,7 @@ async function sendChatAction(chatId, action) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendChatAction`;
   const body = {
     chat_id: chatId,
-    action, // "typing"
+    action, // e.g. "typing"
   };
 
   const res = await fetch(url, {
@@ -184,5 +192,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
   console.log("Webhook URL:", WEBHOOK_URL);
+  // Fire-and-forget: don't block startup
   ensureWebhook();
 });
