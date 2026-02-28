@@ -19,12 +19,11 @@ const PUBLIC_URL = "https://perplexity-tele-bot-production.up.railway.app";
 // Directory for persistent files (Railway Volume mounted at /data)
 const DATA_DIR = process.env.DATA_DIR || "/data";
 
-// OneDrive config (app-only auth, uploading into a specific Entra ID user's drive)
+// OneDrive config (app-only auth, uploading into a specific user's drive)
 const ONEDRIVE_CLIENT_ID = process.env.ONEDRIVE_CLIENT_ID;
 const ONEDRIVE_TENANT_ID = process.env.ONEDRIVE_TENANT_ID;
 const ONEDRIVE_CLIENT_SECRET = process.env.ONEDRIVE_CLIENT_SECRET;
-// IMPORTANT: this must be an Entra user UPN or objectId in the tenant, e.g. "user@yourtenant.onmicrosoft.com"
-const ONEDRIVE_USER = process.env.ONEDRIVE_USER;
+const ONEDRIVE_USER = process.env.ONEDRIVE_USER; // e.g. "your-email@outlook.com"
 const ONEDRIVE_FOLDER_PATH = process.env.ONEDRIVE_FOLDER_PATH || "/TelegramBot";
 
 if (!TELEGRAM_BOT_TOKEN) {
@@ -114,6 +113,28 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     const chatId = message.chat.id;
     const text = (message.text || "").trim();
 
+    // Simple recall example for teacher's name
+    if (
+      text.toLowerCase() === "what's my teacher's name?" ||
+      text.toLowerCase() === "whats my teacher's name?" ||
+      text.toLowerCase() === "whats my teachers name?" ||
+      text.toLowerCase() === "what's my teachers name?"
+    ) {
+      const recalled = recallFromLog("teacher", "people");
+      if (recalled) {
+        await sendTelegramMessage(
+          chatId,
+          `You told me your teacher is ${recalled}.`
+        );
+      } else {
+        await sendTelegramMessage(
+          chatId,
+          "I don't see that in my notes yet."
+        );
+      }
+      return res.sendStatus(200);
+    }
+
     // 1) Handle documents (files)
     if (message.document) {
       const doc = message.document;
@@ -183,10 +204,11 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     const answer = await askPerplexity(text);
     await sendTelegramMessage(chatId, answer);
 
-    // Log each text question to a file in /data
+    // Log each text question to a file in /data, with category
     try {
       const logFile = path.join(DATA_DIR, "messages.log");
-      const line = `[${new Date().toISOString()}] chat:${chatId} text:${JSON.stringify(
+      const category = categorizeMemory(text);
+      const line = `[${new Date().toISOString()}] chat:${chatId} category:${category} text:${JSON.stringify(
         text
       )}\n`;
       fs.appendFileSync(logFile, line, "utf8");
@@ -209,6 +231,96 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     res.sendStatus(500);
   }
 });
+
+// ----- Very simple memory categorisation -----
+
+function categorizeMemory(text) {
+  const t = text.toLowerCase();
+
+  // people / relationships
+  if (
+    t.includes("my teacher is") ||
+    t.includes("my friend is") ||
+    t.includes("my mum is") ||
+    t.includes("my mom is") ||
+    t.includes("my dad is") ||
+    t.includes("my brother is") ||
+    t.includes("my sister is")
+  ) {
+    return "people";
+  }
+
+  // preferences
+  if (
+    t.startsWith("i like ") ||
+    t.startsWith("i love ") ||
+    t.includes("my favourite") ||
+    t.includes("my favorite")
+  ) {
+    return "preferences";
+  }
+
+  // tasks / reminders
+  if (
+    t.startsWith("remind me ") ||
+    t.startsWith("i need to ") ||
+    t.startsWith("i have to ")
+  ) {
+    return "tasks";
+  }
+
+  // simple factual statements
+  if (
+    t.startsWith("i live ") ||
+    t.startsWith("i am ") ||
+    t.startsWith("i'm ") ||
+    t.includes("my school") ||
+    t.includes("my class")
+  ) {
+    return "facts";
+  }
+
+  return "other";
+}
+
+// ----- Very simple memory recall from messages.log -----
+// Optional category filter: if provided, we prefer lines with that category.
+
+function recallFromLog(keyword, preferredCategory = null) {
+  try {
+    const logFile = path.join(DATA_DIR, "messages.log");
+    if (!fs.existsSync(logFile)) return null;
+
+    const content = fs.readFileSync(logFile, "utf8");
+    const lines = content.trim().split("\n").reverse(); // search from latest
+
+    for (const line of lines) {
+      if (preferredCategory && !line.includes(`category:${preferredCategory}`)) {
+        continue;
+      }
+
+      const match = line.match(/text:"(.+?)"/);
+      if (!match) continue;
+      const msg = match[1];
+
+      if (msg.toLowerCase().includes(keyword.toLowerCase())) {
+        // naive pattern: "... is Name"
+        const isIndex = msg.toLowerCase().indexOf(" is ");
+        if (isIndex !== -1) {
+          const afterIs = msg.slice(isIndex + 4).trim();
+          const firstWord = afterIs.split(/\s+/)[0];
+          if (firstWord && /^[A-Z]/.test(firstWord)) {
+            return firstWord;
+          }
+        }
+      }
+    }
+    return null;
+  } catch (err) {
+    console.error("Failed to recall from log:", err);
+    return null;
+  }
+}
 
 // ----- Telegram helper functions -----
 
@@ -332,7 +444,7 @@ async function downloadTelegramFile(fileId, suggestedName) {
   return localPath;
 }
 
-// ----- OneDrive helpers (app-only to a specific Entra user) -----
+// ----- OneDrive helpers -----
 
 async function getOneDriveAccessToken() {
   if (
@@ -379,7 +491,6 @@ async function uploadFileToOneDrive(localPath, remoteFileName) {
     const token = await getOneDriveAccessToken();
     const fileBuffer = fs.readFileSync(localPath);
 
-    // ONEDRIVE_USER must be a valid Entra user in the tenant (UPN or id)
     const uploadUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
       ONEDRIVE_USER
     )}/drive/root:${ONEDRIVE_FOLDER_PATH}/${remoteFileName}:/content`;
@@ -420,8 +531,8 @@ async function ensureWebhook() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: WEBHOOK_URL }),
     });
-    const data = await res.json();
-    console.log("setWebhook response:", data);
+      const data = await res.json();
+      console.log("setWebhook response:", data);
   } catch (err) {
     console.error("Failed to set Telegram webhook:", err);
   }
