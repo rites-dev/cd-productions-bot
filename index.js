@@ -19,10 +19,11 @@ const PUBLIC_URL = "https://perplexity-tele-bot-production.up.railway.app";
 // Directory for persistent files (Railway Volume mounted at /data)
 const DATA_DIR = process.env.DATA_DIR || "/data";
 
-// Optional OneDrive config
+// OneDrive config (app-only auth, uploading into a specific user's drive)
 const ONEDRIVE_CLIENT_ID = process.env.ONEDRIVE_CLIENT_ID;
 const ONEDRIVE_TENANT_ID = process.env.ONEDRIVE_TENANT_ID;
 const ONEDRIVE_CLIENT_SECRET = process.env.ONEDRIVE_CLIENT_SECRET;
+const ONEDRIVE_USER = process.env.ONEDRIVE_USER; // e.g. "your-email@outlook.com"
 const ONEDRIVE_FOLDER_PATH = process.env.ONEDRIVE_FOLDER_PATH || "/TelegramBot";
 
 if (!TELEGRAM_BOT_TOKEN) {
@@ -70,7 +71,12 @@ app.post("/save", async (req, res) => {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
     console.log("Saved file:", filePath);
 
-    if (ONEDRIVE_CLIENT_ID && ONEDRIVE_TENANT_ID && ONEDRIVE_CLIENT_SECRET) {
+    if (
+      ONEDRIVE_CLIENT_ID &&
+      ONEDRIVE_TENANT_ID &&
+      ONEDRIVE_CLIENT_SECRET &&
+      ONEDRIVE_USER
+    ) {
       await uploadFileToOneDrive(filePath, filename);
     }
 
@@ -184,7 +190,12 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       )}\n`;
       fs.appendFileSync(logFile, line, "utf8");
 
-      if (ONEDRIVE_CLIENT_ID && ONEDRIVE_TENANT_ID && ONEDRIVE_CLIENT_SECRET) {
+      if (
+        ONEDRIVE_CLIENT_ID &&
+        ONEDRIVE_TENANT_ID &&
+        ONEDRIVE_CLIENT_SECRET &&
+        ONEDRIVE_USER
+      ) {
         await uploadFileToOneDrive(logFile, "messages.log");
       }
     } catch (err) {
@@ -308,7 +319,12 @@ async function downloadTelegramFile(fileId, suggestedName) {
   fs.writeFileSync(localPath, buffer);
   console.log("Saved Telegram file to:", localPath);
 
-  if (ONEDRIVE_CLIENT_ID && ONEDRIVE_TENANT_ID && ONEDRIVE_CLIENT_SECRET) {
+  if (
+    ONEDRIVE_CLIENT_ID &&
+    ONEDRIVE_TENANT_ID &&
+    ONEDRIVE_CLIENT_SECRET &&
+    ONEDRIVE_USER
+  ) {
     await uploadFileToOneDrive(localPath, safeName);
   }
 
@@ -318,7 +334,11 @@ async function downloadTelegramFile(fileId, suggestedName) {
 // ----- OneDrive helpers -----
 
 async function getOneDriveAccessToken() {
-  if (!ONEDRIVE_CLIENT_ID || !ONEDRIVE_TENANT_ID || !ONEDRIVE_CLIENT_SECRET) {
+  if (
+    !ONEDRIVE_CLIENT_ID ||
+    !ONEDRIVE_TENANT_ID ||
+    !ONEDRIVE_CLIENT_SECRET
+  ) {
     throw new Error("OneDrive env vars not set");
   }
 
@@ -351,10 +371,16 @@ async function getOneDriveAccessToken() {
 
 async function uploadFileToOneDrive(localPath, remoteFileName) {
   try {
+    if (!ONEDRIVE_USER) {
+      throw new Error("ONEDRIVE_USER not set");
+    }
+
     const token = await getOneDriveAccessToken();
     const fileBuffer = fs.readFileSync(localPath);
 
-    const uploadUrl = `https://graph.microsoft.com/v1.0/me/drive/root:${ONEDRIVE_FOLDER_PATH}/${remoteFileName}:/content`;
+    const uploadUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
+      ONEDRIVE_USER
+    )}/drive/root:${ONEDRIVE_FOLDER_PATH}/${remoteFileName}:/content`;
 
     const res = await fetch(uploadUrl, {
       method: "PUT",
