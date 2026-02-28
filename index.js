@@ -1,12 +1,11 @@
 // index.js
 
-// Load .env only in local dev, not on Railway
+// Load .env only in local dev
 if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
 }
 
 const express = require("express");
-const TelegramBot = require("node-telegram-bot-api");
 const fetch = require("node-fetch");
 
 // ----- Environment variables -----
@@ -23,66 +22,113 @@ if (!PPLX_API_KEY) {
   process.exit(1);
 }
 if (!SERVER_URL) {
-  console.error("Missing SERVER_URL env var (Railway public URL)");
+  console.error("Missing SERVER_URL env var (your Railway public URL)");
   process.exit(1);
 }
 
-// ----- Telegram bot setup (webhook, no polling) -----
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
-
-// Webhook path is unique per bot
-const WEBHOOK_PATH = `/webhook/${TELEGRAM_BOT_TOKEN}`;
-const WEBHOOK_URL = `${SERVER_URL}${WEBHOOK_PATH}`;
-
-// Set webhook at startup
-bot
-  .setWebHook(WEBHOOK_URL)
-  .then(() => console.log("Telegram webhook set:", WEBHOOK_URL))
-  .catch((err) => {
-    console.error("Failed to set Telegram webhook:", err);
-    process.exit(1);
-  });
+// Log vars (without exposing secrets)
+console.log("TELEGRAM_BOT_TOKEN present?", !!TELEGRAM_BOT_TOKEN);
+console.log("PPLX_API_KEY present?", !!PPLX_API_KEY);
+console.log("SERVER_URL:", SERVER_URL);
 
 // ----- Express app -----
 const app = express();
 app.use(express.json());
 
-// Telegram will POST updates to this route
-app.post(WEBHOOK_PATH, (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
-});
+// Webhook config
+const WEBHOOK_PATH = `/webhook/${TELEGRAM_BOT_TOKEN}`;
+const WEBHOOK_URL = `${SERVER_URL}${WEBHOOK_PATH}`;
 
-// Simple health check
+console.log("Webhook will be set to:", WEBHOOK_URL);
+
+// Health check
 app.get("/", (req, res) => {
   res.send("Telegram + Perplexity bot is running");
 });
 
-// ----- Bot behavior -----
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text || "";
-
-  // Basic /start
-  if (text === "/start") {
-    await bot.sendMessage(
-      chatId,
-      "Hi! Send me a question and I’ll ask Perplexity for an answer."
-    );
-    return;
-  }
-
-  // Ignore empty messages
-  if (!text.trim()) {
-    await bot.sendMessage(chatId, "Please send some text.");
-    return;
-  }
-
-  // Call Perplexity API
+// Telegram sends updates here
+app.post(WEBHOOK_PATH, async (req, res) => {
   try {
-    await bot.sendChatAction(chatId, "typing");
+    const update = req.body;
 
-    const response = await fetch("https://api.perplexity.ai/chat/completions", {
+    if (!update.message || !update.message.text) {
+      return res.sendStatus(200);
+    }
+
+    const chatId = update.message.chat.id;
+    const text = update.message.text.trim();
+
+    if (text === "/start") {
+      await sendTelegramMessage(
+        chatId,
+        "Hi! Send me a question and I'll ask Perplexity for you."
+      );
+      return res.sendStatus(200);
+    }
+
+    if (!text) {
+      await sendTelegramMessage(chatId, "Please send some text.");
+      return res.sendStatus(200);
+    }
+
+    await sendChatAction(chatId, "typing");
+
+    const answer = await askPerplexity(text);
+    await sendTelegramMessage(chatId, answer);
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Error in webhook handler:", err);
+    res.sendStatus(500);
+  }
+});
+
+// ----- Telegram helper functions (raw HTTP API) -----
+
+async function sendTelegramMessage(chatId, text) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const body = {
+    chat_id: chatId,
+    text,
+    parse_mode: "Markdown",
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const data = await res.json();
+  if (!data.ok) {
+    console.error("sendMessage error:", data);
+  }
+}
+
+async function sendChatAction(chatId, action) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendChatAction`;
+  const body = {
+    chat_id: chatId,
+    action, // "typing"
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const data = await res.json();
+  if (!data.ok) {
+    console.error("sendChatAction error:", data);
+  }
+}
+
+// ----- Perplexity helper -----
+
+async function askPerplexity(prompt) {
+  try {
+    const res = await fetch("https://api.perplexity.ai/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -92,38 +138,51 @@ bot.on("message", async (msg) => {
         model: "sonar",
         messages: [
           { role: "system", content: "You are a helpful Telegram assistant." },
-          { role: "user", content: text },
+          { role: "user", content: prompt },
         ],
       }),
     });
 
-    if (!response.ok) {
-      console.error("Perplexity API error:", await response.text());
-      await bot.sendMessage(
-        chatId,
-        "Sorry, I had an issue talking to the AI. Try again later."
-      );
-      return;
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("Perplexity API error:", res.status, text);
+      return "Sorry, I had an issue talking to the AI. Try again later.";
     }
 
-    const data = await response.json();
+    const data = await res.json();
     const answer =
       data.choices?.[0]?.message?.content?.trim() ||
       "I couldn't generate a response.";
-
-    await bot.sendMessage(chatId, answer, { parse_mode: "Markdown" });
+    return answer;
   } catch (err) {
-    console.error("Error handling message:", err);
-    await bot.sendMessage(
-      chatId,
-      "Sorry, something went wrong while processing your message."
-    );
+    console.error("Error calling Perplexity:", err);
+    return "Sorry, something went wrong while contacting the AI.";
   }
-});
+}
 
-// ----- Start server on Railway-assigned port -----
+// ----- Webhook setup (non-blocking) -----
+
+async function ensureWebhook() {
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: WEBHOOK_URL }),
+    });
+    const data = await res.json();
+    console.log("setWebhook response:", data);
+  } catch (err) {
+    console.error("Failed to set Telegram webhook:", err);
+  }
+}
+
+// ----- Start server -----
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log("Webhook URL:", WEBHOOK_URL);
+  // Fire-and-forget: don't block startup
+  ensureWebhook();
 });
