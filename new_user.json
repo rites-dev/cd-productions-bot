@@ -1,0 +1,74 @@
+{
+  "request": {
+    "method": "POST",
+    "url": "https://admin.googleapis.com/admin/directory/v1/users",
+    "headers": {
+      "Authorization": "Bearer YOUR_ACCESS_TOKEN_HERE",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "primaryEmail": "REPLACE_WITH_SQUARESPACE_USERNAME@carpediemprods.com",
+      "name": {
+        "givenName": "REPLACE_WITH_FIRST_NAME",
+        "familyName": "REPLACE_WITH_LAST_NAME",
+        "fullName": "REPLACE_WITH_FULL_NAME"
+      },
+      "password": "TempPass123!",
+      "changePasswordAtNextLogin": true,
+      "orgUnitPath": "/Guests",
+      "suspended": false,
+      "recoveryEmail": "REPLACE_WITH_PERSONAL_EMAIL",
+      "recoveryPhone": "REPLACE_WITH_PHONE",
+      "phones": [
+        {
+          "type": "work",
+          "value": "REPLACE_WITH_PHONE",
+          "primary": true
+        }
+      ],
+      "addresses": [
+        {
+          "type": "work",
+          "streetAddress": "123 Example Street",
+          "locality": "Singapore",
+          "postalCode": "123456",
+          "country": "Singapore",
+          "primary": true
+        }
+      ],
+      "organizations": [
+        {
+          "name": "Carpe Diem Productions",
+          "title": "Guest",
+          "department": "Guests",
+          "primary": true
+        }
+      ],
+      "emails": [
+        {
+          "address": "REPLACE_WITH_ALIAS@carpediemprods.com",
+          "type": "work",
+          "primary": false
+        }
+      ],
+      "externalIds": [
+        {
+          "type": "organization",
+          "value": "GUEST-ID-PLACEHOLDER"
+        }
+      ],
+      "relations": [
+        {
+          "type": "manager",
+          "value": "host@carpediemprods.com"
+        }
+      ],
+      "notes": {
+        "value": "Guest account – intended for Google Meet only. Place in /Guests OU and restrict services there.",
+        "contentType": "plainText"
+      },
+      "agreedToTerms": true,
+      "ipWhitelisted": false
+    }
+  }
+}

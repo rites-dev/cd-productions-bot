@@ -15,7 +15,9 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PPLX_API_KEY = process.env.PPLX_API_KEY;
 
 // Public URL for your Railway app (no trailing slash)
-const PUBLIC_URL = "https://perplexity-tele-bot-production.up.railway.app";
+const PUBLIC_URL =
+  process.env.PUBLIC_URL ||
+  "https://perplexity-tele-bot-production.up.railway.app";
 
 // Directory for persistent files (Railway Volume mounted at /data)
 const DATA_DIR = process.env.DATA_DIR || "/data";
@@ -25,18 +27,36 @@ const ONEDRIVE_CLIENT_ID = process.env.ONEDRIVE_CLIENT_ID;
 const ONEDRIVE_TENANT_ID = process.env.ONEDRIVE_TENANT_ID;
 const ONEDRIVE_CLIENT_SECRET = process.env.ONEDRIVE_CLIENT_SECRET;
 const ONEDRIVE_USER = process.env.ONEDRIVE_USER; // UPN in your tenant
-const ONEDRIVE_FOLDER_PATH = process.env.ONEDRIVE_FOLDER_PATH || "/TelegramBot";
+const ONEDRIVE_FOLDER_PATH =
+  process.env.ONEDRIVE_FOLDER_PATH || "/TelegramBot";
 
 // Google OAuth / Drive config
 const GDRIVE_OAUTH_CLIENT_ID = process.env.GDRIVE_OAUTH_CLIENT_ID;
 const GDRIVE_OAUTH_CLIENT_SECRET = process.env.GDRIVE_OAUTH_CLIENT_SECRET;
 const GDRIVE_REDIRECT_URI = process.env.GDRIVE_REDIRECT_URI;
-const GDRIVE_FOLDER_ID = process.env.GDRIVE_FOLDER_ID; // Root Shared Drive folder
+const GDRIVE_FOLDER_ID = process.env.GDRIVE_FOLDER_ID; // Root Shared Drive
 
 // Google Drive subfolder IDs (routing)
 const GDRIVE_FOLDER_POEMS = process.env.GDRIVE_FOLDER_POEMS;
 const GDRIVE_FOLDER_THEATRE = process.env.GDRIVE_FOLDER_THEATRE;
-const GDRIVE_FOLDER_COMMON = process.env.GDRIVE_FOLDER_COMMON; // e.g. Common Files root
+
+// New: granular common folders
+const GDRIVE_FOLDER_COMMON_NOTES =
+  process.env.GDRIVE_FOLDER_COMMON_NOTES || GDRIVE_FOLDER_ID;
+const GDRIVE_FOLDER_COMMON_IDEAS =
+  process.env.GDRIVE_FOLDER_COMMON_IDEAS || GDRIVE_FOLDER_ID;
+const GDRIVE_FOLDER_COMMON_MISC =
+  process.env.GDRIVE_FOLDER_COMMON_MISC || GDRIVE_FOLDER_ID;
+
+// Service account for Admin SDK (domain-wide delegation)
+const SA_CLIENT_EMAIL = process.env.SA_CLIENT_EMAIL;
+const SA_PRIVATE_KEY = process.env.SA_PRIVATE_KEY;
+const SA_TOKEN_URI =
+  process.env.SA_TOKEN_URI || "https://oauth2.googleapis.com/token";
+const ADMIN_IMPERSONATE = process.env.ADMIN_IMPERSONATE; // e.g. admin@carpediemprods.com
+
+// Domain for new Google Workspace users
+const ORG_DOMAIN = "carpediemprods.com";
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN env var");
@@ -46,11 +66,14 @@ if (!PPLX_API_KEY) {
   console.error("Missing PPLX_API_KEY env var");
   process.exit(1);
 }
+if (!SA_CLIENT_EMAIL || !SA_PRIVATE_KEY || !ADMIN_IMPERSONATE) {
+  console.warn(
+    "WARNING: SA_CLIENT_EMAIL / SA_PRIVATE_KEY / ADMIN_IMPERSONATE not fully set. Google user creation will fail."
+  );
+}
 
 // In‑memory per‑chat upload preference ("onedrive" or "gdrive")
 const uploadTargetByChat = new Map();
-// In‑memory pending upload, waiting for type answer
-// pendingUploadByChat[chatId] = { path, name, target }
 const pendingUploadByChat = new Map();
 
 // Ensure data directory exists
@@ -76,7 +99,7 @@ app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
 });
 
-// Start Google OAuth flow (visit this URL once in browser)
+// Start Google OAuth flow (Drive)
 app.get("/auth/google", (req, res) => {
   try {
     const oAuth2Client = getGoogleOAuthClient();
@@ -84,8 +107,8 @@ app.get("/auth/google", (req, res) => {
     const scopes = ["https://www.googleapis.com/auth/drive.file"];
 
     const url = oAuth2Client.generateAuthUrl({
-      access_type: "offline", // needed for refresh_token
-      prompt: "consent", // force refresh_token each time
+      access_type: "offline",
+      prompt: "consent",
       scope: scopes,
     });
 
@@ -96,7 +119,7 @@ app.get("/auth/google", (req, res) => {
   }
 });
 
-// OAuth2 callback URL configured in Google Cloud (GDRIVE_REDIRECT_URI)
+// OAuth2 callback URL configured in Google Cloud (Drive)
 app.get("/oauth2callback", async (req, res) => {
   try {
     const code = req.query.code;
@@ -124,8 +147,7 @@ app.get("/oauth2callback", async (req, res) => {
   }
 });
 
-// Simple save route to test file writes:
-// POST /save { "filename": "test.json", "data": { "foo": "bar" } }
+// Simple save route
 app.post("/save", async (req, res) => {
   const { filename, data } = req.body || {};
   if (!filename || !data) {
@@ -143,7 +165,6 @@ app.post("/save", async (req, res) => {
       ONEDRIVE_CLIENT_SECRET &&
       ONEDRIVE_USER
     ) {
-      // Treat global scripts as common files
       await uploadFileToOneDrive(filePath, filename, "global", "Common Files");
     }
 
@@ -165,7 +186,7 @@ app.get("/", (req, res) => {
   res.send("Telegram + Perplexity bot is running");
 });
 
-// Telegram sends updates here
+// Telegram webhook
 app.post(WEBHOOK_PATH, async (req, res) => {
   try {
     const update = req.body;
@@ -180,7 +201,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     const chatId = message.chat.id;
     const text = (message.text || "").trim();
 
-    // ---- /mkdir command: create a folder in OneDrive under this chat ----
+    // /mkdir
     if (text.toLowerCase().startsWith("/mkdir")) {
       const parts = text.split(" ").filter(Boolean);
       if (parts.length < 2) {
@@ -209,7 +230,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ---- /uploadonedrive: next file -> OneDrive (interactive) ----
+    // /uploadonedrive
     if (text.toLowerCase().startsWith("/uploadonedrive")) {
       uploadTargetByChat.set(chatId, "onedrive");
       await sendTelegramMessage(
@@ -219,7 +240,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ---- /uploadgdrive: next file -> Google Drive (interactive) ----
+    // /uploadgdrive
     if (text.toLowerCase().startsWith("/uploadgdrive")) {
       uploadTargetByChat.set(chatId, "gdrive");
       await sendTelegramMessage(
@@ -229,7 +250,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ---- If we are waiting for a type answer (poems/theatre/common) ----
+    // waiting for type answer
     if (pendingUploadByChat.has(chatId)) {
       const pending = pendingUploadByChat.get(chatId);
       const lower = text.toLowerCase();
@@ -247,7 +268,6 @@ app.post(WEBHOOK_PATH, async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // If they reply with something else, remind them
       await sendTelegramMessage(
         chatId,
         "Please reply with one of: poems, theatre, or common."
@@ -255,7 +275,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ---- /remember command: recall last memory matching a keyword ----
+    // /remember
     if (text.toLowerCase().startsWith("/remember")) {
       const parts = text.split(" ").filter(Boolean);
       if (parts.length < 2) {
@@ -284,14 +304,13 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Simple recall example for teacher's name (shortcut)
+    // teacher shortcut
     if (
       text.toLowerCase() === "what's my teacher's name?" ||
       text.toLowerCase() === "whats my teacher's name?" ||
       text.toLowerCase() === "whats my teachers name?" ||
       text.toLowerCase() === "what's my teachers name?"
     ) {
-      // with new categories, treat as common
       const recalled = recallFromLog("teacher", "common");
       if (recalled) {
         await sendTelegramMessage(
@@ -307,14 +326,18 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 1) Handle documents (files)
+    // documents
     if (message.document) {
       const doc = message.document;
       const fileId = doc.file_id;
       const originalName = doc.file_name || `${fileId}.bin`;
 
       try {
-        const localPath = await downloadTelegramFile(fileId, originalName, chatId);
+        const localPath = await downloadTelegramFile(
+          fileId,
+          originalName,
+          chatId
+        );
 
         const target = uploadTargetByChat.get(chatId);
         if (target === "onedrive" || target === "gdrive") {
@@ -346,14 +369,18 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 2) Handle photos (save highest-resolution variant)
-    if (message.photo && Array.isArray(message.photo) && message.photo.length > 0) {
+    // photos
+    if (message.photo && Array.isArray(message.photo) && message.photo.length) {
       const bestPhoto = message.photo[message.photo.length - 1];
       const fileId = bestPhoto.file_id;
       const originalName = `photo_${fileId}.jpg`;
 
       try {
-        const localPath = await downloadTelegramFile(fileId, originalName, chatId);
+        const localPath = await downloadTelegramFile(
+          fileId,
+          originalName,
+          chatId
+        );
 
         const target = uploadTargetByChat.get(chatId);
         if (target === "onedrive" || target === "gdrive") {
@@ -385,7 +412,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 3) If no text and no file-like content
+    // no text and no file
     if (!text) {
       await sendTelegramMessage(
         chatId,
@@ -394,7 +421,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 4) Normal text flow with Perplexity
+    // /start
     if (text === "/start") {
       await sendTelegramMessage(
         chatId,
@@ -403,15 +430,16 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // normal text flow
     await sendChatAction(chatId, "typing");
 
     const answer = await askPerplexity(text);
     await sendTelegramMessage(chatId, answer);
 
-    // Log each text question to a file in /data, with category
+    // log text
     try {
       const logFile = path.join(DATA_DIR, "messages.log");
-      const category = categorizeMemory(text); // poems / theatre / common
+      const category = categorizeMemory(text);
       const line = `[${new Date().toISOString()}] chat:${chatId} category:${category} text:${JSON.stringify(
         text
       )}\n`;
@@ -423,7 +451,6 @@ app.post(WEBHOOK_PATH, async (req, res) => {
         ONEDRIVE_CLIENT_SECRET &&
         ONEDRIVE_USER
       ) {
-        // Store logs under Common Files
         await uploadFileToOneDrive(
           logFile,
           "messages.log",
@@ -439,6 +466,52 @@ app.post(WEBHOOK_PATH, async (req, res) => {
   } catch (err) {
     console.error("Error in webhook handler:", err);
     res.sendStatus(500);
+  }
+});
+
+// ----- Squarespace → Google Workspace route -----
+
+app.post("/squarespace", async (req, res) => {
+  try {
+    console.log("Incoming Squarespace payload:", JSON.stringify(req.body));
+
+    const firstName = req.body.firstName || req.body["First Name"] || "";
+    const lastName = req.body.lastName || req.body["Last Name"] || "";
+    const personalEmail = req.body.personalEmail || req.body["Email"] || "";
+    const phone = req.body.phone || req.body["Phone"] || "";
+
+    const rawUsername =
+      req.body.username ||
+      req.body["Username"] ||
+      `${firstName}.${lastName}`;
+
+    const username = String(rawUsername)
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, "")
+      .replace(/[^a-z0-9.]/g, "");
+
+    if (!firstName || !lastName || !personalEmail || !username) {
+      return res.status(400).json({
+        error: "missing_fields",
+        details: { firstName, lastName, personalEmail, phone, username },
+      });
+    }
+
+    const user = await createGoogleWorkspaceUser({
+      firstName,
+      lastName,
+      personalEmail,
+      phone,
+      username,
+    });
+
+    return res.status(201).json({ status: "created", user });
+  } catch (err) {
+    console.error("Squarespace webhook error:", err);
+    return res
+      .status(500)
+      .json({ error: "server_error", message: err.message });
   }
 });
 
@@ -477,12 +550,11 @@ async function handlePendingUploadWithType(chatId, pending, type) {
   }
 }
 
-// ----- Memory categorisation: poems / theatre / common -----
+// ----- Memory categorisation -----
 
 function categorizeMemory(text) {
   const t = text.toLowerCase();
 
-  // poems
   if (
     t.includes("poem") ||
     t.includes("poetry") ||
@@ -496,7 +568,6 @@ function categorizeMemory(text) {
     return "poems";
   }
 
-  // theatre
   if (
     t.includes("theatre") ||
     t.includes("theater") ||
@@ -514,11 +585,10 @@ function categorizeMemory(text) {
     return "theatre";
   }
 
-  // common (fallback)
   return "common";
 }
 
-// ----- Very simple memory recall from messages.log -----
+// ----- Very simple memory recall -----
 
 function recallFromLog(keyword, preferredCategory = null) {
   try {
@@ -526,14 +596,14 @@ function recallFromLog(keyword, preferredCategory = null) {
     if (!fs.existsSync(logFile)) return null;
 
     const content = fs.readFileSync(logFile, "utf8");
-    const lines = content.trim().split("\n").reverse(); // search from latest
+    const lines = content.trim().split("\n").reverse();
 
     for (const line of lines) {
       if (preferredCategory && !line.includes(`category:${preferredCategory}`)) {
         continue;
       }
 
-      const match = line.match(/text:"(.+?)"/);
+      const match = line.match(/text:\"(.+?)\"/);
       if (!match) continue;
       const msg = match[1];
 
@@ -548,7 +618,7 @@ function recallFromLog(keyword, preferredCategory = null) {
   }
 }
 
-// ----- Telegram helper functions -----
+// ----- Telegram helpers -----
 
 async function sendTelegramMessage(chatId, text) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -658,7 +728,6 @@ async function downloadTelegramFile(fileId, suggestedName, chatId) {
   fs.writeFileSync(localPath, buffer);
   console.log("Saved Telegram file to:", localPath);
 
-  // Upload is now controlled by interactive flow
   return localPath;
 }
 
@@ -700,7 +769,7 @@ async function getOneDriveAccessToken() {
   return data.access_token;
 }
 
-// Upload into /TelegramBot/chat_<chatId>/<kind>/
+// Upload into /TelegramBot/chat_<id>/
 async function uploadFileToOneDrive(
   localPath,
   remoteFileName,
@@ -718,7 +787,7 @@ async function uploadFileToOneDrive(
     const token = await getOneDriveAccessToken();
     const fileBuffer = fs.readFileSync(localPath);
 
-    const baseFolder = ONEDRIVE_FOLDER_PATH; // e.g. "/TelegramBot"
+    const baseFolder = ONEDRIVE_FOLDER_PATH;
     const folderPath = `${baseFolder}/chat_${chatId}/${kind}`;
 
     const uploadUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
@@ -751,7 +820,7 @@ async function uploadFileToOneDrive(
   }
 }
 
-// Create a OneDrive folder via .keep file under /TelegramBot/chat_<chatId>/<folderName>/
+// Create a OneDrive folder via .keep file
 async function createOneDriveFolder(folderName, chatId) {
   try {
     if (!ONEDRIVE_USER) throw new Error("ONEDRIVE_USER not set");
@@ -760,7 +829,7 @@ async function createOneDriveFolder(folderName, chatId) {
     const token = await getOneDriveAccessToken();
     const buffer = Buffer.from("folder placeholder");
 
-    const baseFolder = ONEDRIVE_FOLDER_PATH; // e.g. "/TelegramBot"
+    const baseFolder = ONEDRIVE_FOLDER_PATH;
     const folderPath = `${baseFolder}/chat_${chatId}/${folderName}`;
     const fileName = ".keep";
 
@@ -847,11 +916,23 @@ function chooseGDriveFolderIdFromType(type) {
   if (type === "theatre") {
     return GDRIVE_FOLDER_THEATRE || GDRIVE_FOLDER_ID;
   }
-  return GDRIVE_FOLDER_COMMON || GDRIVE_FOLDER_ID;
+
+  return (
+    GDRIVE_FOLDER_COMMON_NOTES ||
+    GDRIVE_FOLDER_COMMON_IDEAS ||
+    GDRIVE_FOLDER_COMMON_MISC ||
+    GDRIVE_FOLDER_ID
+  );
 }
 
-// ----- Google Drive helper (OAuth-based) -----
-async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId, folderIdOverride) {
+// ----- Google Drive helper -----
+
+async function uploadFileToGoogleDrive(
+  localPath,
+  remoteFileName,
+  chatId,
+  folderIdOverride
+) {
   try {
     const targetFolderId = folderIdOverride || GDRIVE_FOLDER_ID;
     if (!targetFolderId) {
@@ -871,7 +952,7 @@ async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId, folder
 
     const fileMetadata = {
       name: remoteFileName,
-      parents: [targetFolderId], // chosen folder
+      parents: [targetFolderId],
     };
 
     const media = {
@@ -894,6 +975,96 @@ async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId, folder
   } catch (err) {
     console.error("Failed to upload to Google Drive:", err);
   }
+}
+
+// ----- Google Workspace user helper (service account JWT) -----
+
+async function createGoogleWorkspaceUser({
+  firstName,
+  lastName,
+  personalEmail,
+  phone,
+  username,
+}) {
+  if (!SA_CLIENT_EMAIL || !SA_PRIVATE_KEY || !ADMIN_IMPERSONATE) {
+    throw new Error("Service account env vars not configured");
+  }
+
+  const scopes = ["https://www.googleapis.com/auth/admin.directory.user"];
+  const jwtClient = new google.auth.JWT(
+    SA_CLIENT_EMAIL,
+    null,
+    SA_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    scopes,
+    ADMIN_IMPERSONATE
+  );
+
+  const tokens = await jwtClient.authorize();
+  const accessToken = tokens.access_token;
+  if (!accessToken) {
+    throw new Error("Failed to obtain access token from service account");
+  }
+
+  const safeUsername = String(username)
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[^a-z0-9.]/g, "");
+
+  const primaryEmail = `${safeUsername}@${ORG_DOMAIN}`;
+
+  const body = {
+    primaryEmail,
+    name: {
+      givenName: firstName,
+      familyName: lastName,
+      fullName: `${firstName} ${lastName}`.trim(),
+    },
+    password: "TempPass123!",
+    changePasswordAtNextLogin: true,
+    orgUnitPath: "/Guests",
+    suspended: false,
+    recoveryEmail: personalEmail,
+    recoveryPhone: phone,
+    phones: [
+      {
+        type: "work",
+        value: phone,
+        primary: true,
+      },
+    ],
+    notes: {
+      value:
+        "Guest account – intended for Google Meet only. Place in /Guests OU and restrict services there.",
+      contentType: "plainText",
+    },
+    agreedToTerms: true,
+    ipWhitelisted: false,
+  };
+
+  console.log("Creating Google user:", body);
+
+  const resp = await fetch(
+    "https://admin.googleapis.com/admin/directory/v1/users",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    console.error("Google Admin error:", text);
+    throw new Error(`Google Admin error: ${text}`);
+  }
+
+  const user = await resp.json();
+  console.log("Created Google user:", user);
+  return user;
 }
 
 // ----- Webhook setup (non-blocking) -----
