@@ -31,7 +31,12 @@ const ONEDRIVE_FOLDER_PATH = process.env.ONEDRIVE_FOLDER_PATH || "/TelegramBot";
 const GDRIVE_OAUTH_CLIENT_ID = process.env.GDRIVE_OAUTH_CLIENT_ID;
 const GDRIVE_OAUTH_CLIENT_SECRET = process.env.GDRIVE_OAUTH_CLIENT_SECRET;
 const GDRIVE_REDIRECT_URI = process.env.GDRIVE_REDIRECT_URI;
-const GDRIVE_FOLDER_ID = process.env.GDRIVE_FOLDER_ID; // Shared Drive folder ID
+const GDRIVE_FOLDER_ID = process.env.GDRIVE_FOLDER_ID; // Root Shared Drive folder
+
+// Google Drive subfolder IDs (routing)
+const GDRIVE_FOLDER_POEMS = process.env.GDRIVE_FOLDER_POEMS;
+const GDRIVE_FOLDER_THEATRE = process.env.GDRIVE_FOLDER_THEATRE;
+const GDRIVE_FOLDER_COMMON = process.env.GDRIVE_FOLDER_COMMON; // e.g. Common Files root
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN env var");
@@ -44,6 +49,9 @@ if (!PPLX_API_KEY) {
 
 // In‑memory per‑chat upload preference ("onedrive" or "gdrive")
 const uploadTargetByChat = new Map();
+// In‑memory pending upload, waiting for type answer
+// pendingUploadByChat[chatId] = { path, name, target }
+const pendingUploadByChat = new Map();
 
 // Ensure data directory exists
 try {
@@ -136,7 +144,7 @@ app.post("/save", async (req, res) => {
       ONEDRIVE_USER
     ) {
       // Treat global scripts as common files
-      await uploadFileToOneDrive(filePath, filename, "global", "Common Files/Misc");
+      await uploadFileToOneDrive(filePath, filename, "global", "Common Files");
     }
 
     return res.status(200).json({ ok: true, path: filePath });
@@ -201,22 +209,48 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ---- /uploadonedrive: next file -> OneDrive ----
+    // ---- /uploadonedrive: next file -> OneDrive (interactive) ----
     if (text.toLowerCase().startsWith("/uploadonedrive")) {
       uploadTargetByChat.set(chatId, "onedrive");
       await sendTelegramMessage(
         chatId,
-        "Okay, your *next* file or photo will be uploaded to OneDrive (as well as saved locally)."
+        "Okay, send me a file or photo, then I'll ask if it's poems, theatre, or common."
       );
       return res.sendStatus(200);
     }
 
-    // ---- /uploadgdrive: next file -> Google Drive ----
+    // ---- /uploadgdrive: next file -> Google Drive (interactive) ----
     if (text.toLowerCase().startsWith("/uploadgdrive")) {
       uploadTargetByChat.set(chatId, "gdrive");
       await sendTelegramMessage(
         chatId,
-        "Okay, your *next* file or photo will be uploaded to Google Drive (as well as saved locally)."
+        "Okay, send me a file or photo, then I'll ask if it's poems, theatre, or common."
+      );
+      return res.sendStatus(200);
+    }
+
+    // ---- If we are waiting for a type answer (poems/theatre/common) ----
+    if (pendingUploadByChat.has(chatId)) {
+      const pending = pendingUploadByChat.get(chatId);
+      const lower = text.toLowerCase();
+
+      if (["poems", "poem"].includes(lower)) {
+        await handlePendingUploadWithType(chatId, pending, "poems");
+        return res.sendStatus(200);
+      }
+      if (["theatre", "theater"].includes(lower)) {
+        await handlePendingUploadWithType(chatId, pending, "theatre");
+        return res.sendStatus(200);
+      }
+      if (["common", "others", "other"].includes(lower)) {
+        await handlePendingUploadWithType(chatId, pending, "common");
+        return res.sendStatus(200);
+      }
+
+      // If they reply with something else, remind them
+      await sendTelegramMessage(
+        chatId,
+        "Please reply with one of: poems, theatre, or common."
       );
       return res.sendStatus(200);
     }
@@ -282,38 +316,25 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       try {
         const localPath = await downloadTelegramFile(fileId, originalName, chatId);
 
-        // Decide folder based on last command and (optionally) caption
         const target = uploadTargetByChat.get(chatId);
-        let onedriveKind = "Common Files/Misc";
+        if (target === "onedrive" || target === "gdrive") {
+          pendingUploadByChat.set(chatId, {
+            path: localPath,
+            name: path.basename(localPath),
+            target,
+          });
+          uploadTargetByChat.delete(chatId);
 
-        if (message.caption) {
-          const cat = categorizeMemory(message.caption);
-          if (cat === "poems") onedriveKind = "Poems";
-          else if (cat === "theatre") onedriveKind = "Theatre";
-          else onedriveKind = "Common Files/Notes";
-        }
-
-        if (target === "onedrive") {
-          await uploadFileToOneDrive(
-            localPath,
-            path.basename(localPath),
+          await sendTelegramMessage(
             chatId,
-            onedriveKind
+            "Got your file. Is this *poems*, *theatre*, or *common*?"
           );
-          uploadTargetByChat.delete(chatId);
-        } else if (target === "gdrive") {
-          await uploadFileToGoogleDrive(
-            localPath,
-            path.basename(localPath),
-            chatId
+        } else {
+          await sendTelegramMessage(
+            chatId,
+            `I saved your file as \`${path.basename(localPath)}\` on the server.`
           );
-          uploadTargetByChat.delete(chatId);
         }
-
-        await sendTelegramMessage(
-          chatId,
-          `I saved your file as \`${path.basename(localPath)}\` on the server.`
-        );
       } catch (err) {
         console.error("Failed to download/save document:", err);
         await sendTelegramMessage(
@@ -335,36 +356,24 @@ app.post(WEBHOOK_PATH, async (req, res) => {
         const localPath = await downloadTelegramFile(fileId, originalName, chatId);
 
         const target = uploadTargetByChat.get(chatId);
-        let onedriveKind = "Common Files/Misc";
+        if (target === "onedrive" || target === "gdrive") {
+          pendingUploadByChat.set(chatId, {
+            path: localPath,
+            name: path.basename(localPath),
+            target,
+          });
+          uploadTargetByChat.delete(chatId);
 
-        if (message.caption) {
-          const cat = categorizeMemory(message.caption);
-          if (cat === "poems") onedriveKind = "Poems";
-          else if (cat === "theatre") onedriveKind = "Theatre";
-          else onedriveKind = "Common Files/Ideas";
-        }
-
-        if (target === "onedrive") {
-          await uploadFileToOneDrive(
-            localPath,
-            path.basename(localPath),
+          await sendTelegramMessage(
             chatId,
-            onedriveKind
+            "Got your photo. Is this *poems*, *theatre*, or *common*?"
           );
-          uploadTargetByChat.delete(chatId);
-        } else if (target === "gdrive") {
-          await uploadFileToGoogleDrive(
-            localPath,
-            path.basename(localPath),
-            chatId
+        } else {
+          await sendTelegramMessage(
+            chatId,
+            `I saved your photo as \`${path.basename(localPath)}\` on the server.`
           );
-          uploadTargetByChat.delete(chatId);
         }
-
-        await sendTelegramMessage(
-          chatId,
-          `I saved your photo as \`${path.basename(localPath)}\` on the server.`
-        );
       } catch (err) {
         console.error("Failed to download/save photo:", err);
         await sendTelegramMessage(
@@ -419,7 +428,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
           logFile,
           "messages.log",
           chatId,
-          "Common Files/References"
+          "Common Files"
         );
       }
     } catch (err) {
@@ -432,6 +441,41 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     res.sendStatus(500);
   }
 });
+
+// ----- Handle pending upload once user answers type -----
+
+async function handlePendingUploadWithType(chatId, pending, type) {
+  try {
+    const { path: localPath, name, target } = pending;
+
+    if (target === "onedrive") {
+      let kind = "Common Files";
+      if (type === "poems") kind = "Poems";
+      else if (type === "theatre") kind = "Theatre";
+
+      await uploadFileToOneDrive(localPath, name, chatId, kind);
+      await sendTelegramMessage(
+        chatId,
+        `Uploaded to OneDrive under *${kind}* as \`${name}\`.`
+      );
+    } else if (target === "gdrive") {
+      const folderId = chooseGDriveFolderIdFromType(type);
+      await uploadFileToGoogleDrive(localPath, name, chatId, folderId);
+      await sendTelegramMessage(
+        chatId,
+        `Uploaded to Google Drive as *${type}* file \`${name}\`.`
+      );
+    }
+  } catch (err) {
+    console.error("Error handling pending upload:", err);
+    await sendTelegramMessage(
+      chatId,
+      "Something went wrong uploading that file. Please try again."
+    );
+  } finally {
+    pendingUploadByChat.delete(chatId);
+  }
+}
 
 // ----- Memory categorisation: poems / theatre / common -----
 
@@ -614,7 +658,7 @@ async function downloadTelegramFile(fileId, suggestedName, chatId) {
   fs.writeFileSync(localPath, buffer);
   console.log("Saved Telegram file to:", localPath);
 
-  // Upload is now controlled by slash commands in the message handlers
+  // Upload is now controlled by interactive flow
   return localPath;
 }
 
@@ -661,7 +705,7 @@ async function uploadFileToOneDrive(
   localPath,
   remoteFileName,
   chatId,
-  kind = "Common Files/Misc"
+  kind = "Common Files"
 ) {
   try {
     if (!ONEDRIVE_USER) {
@@ -675,7 +719,6 @@ async function uploadFileToOneDrive(
     const fileBuffer = fs.readFileSync(localPath);
 
     const baseFolder = ONEDRIVE_FOLDER_PATH; // e.g. "/TelegramBot"
-    // kind may be "Poems", "Theatre", or "Common Files/SubFolder"
     const folderPath = `${baseFolder}/chat_${chatId}/${kind}`;
 
     const uploadUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
@@ -797,10 +840,21 @@ function saveGoogleToken(token) {
   }
 }
 
+function chooseGDriveFolderIdFromType(type) {
+  if (type === "poems") {
+    return GDRIVE_FOLDER_POEMS || GDRIVE_FOLDER_ID;
+  }
+  if (type === "theatre") {
+    return GDRIVE_FOLDER_THEATRE || GDRIVE_FOLDER_ID;
+  }
+  return GDRIVE_FOLDER_COMMON || GDRIVE_FOLDER_ID;
+}
+
 // ----- Google Drive helper (OAuth-based) -----
-async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId) {
+async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId, folderIdOverride) {
   try {
-    if (!GDRIVE_FOLDER_ID) {
+    const targetFolderId = folderIdOverride || GDRIVE_FOLDER_ID;
+    if (!targetFolderId) {
       throw new Error("GDRIVE_FOLDER_ID not set");
     }
 
@@ -817,7 +871,7 @@ async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId) {
 
     const fileMetadata = {
       name: remoteFileName,
-      parents: [GDRIVE_FOLDER_ID], // Shared Drive folder
+      parents: [targetFolderId], // chosen folder
     };
 
     const media = {
@@ -833,7 +887,7 @@ async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId) {
     });
 
     console.log(
-      `Uploaded to Google Drive (chat ${chatId}):`,
+      `Uploaded to Google Drive (chat ${chatId}) in folder ${targetFolderId}:`,
       response.data.id,
       response.data.webViewLink
     );
