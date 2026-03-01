@@ -8,6 +8,7 @@ const express = require("express");
 const fetch = require("node-fetch");
 const fs = require("fs");
 const path = require("path");
+const { google } = require("googleapis");
 
 // ----- Environment variables -----
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -25,6 +26,12 @@ const ONEDRIVE_TENANT_ID = process.env.ONEDRIVE_TENANT_ID;
 const ONEDRIVE_CLIENT_SECRET = process.env.ONEDRIVE_CLIENT_SECRET;
 const ONEDRIVE_USER = process.env.ONEDRIVE_USER; // UPN in your tenant
 const ONEDRIVE_FOLDER_PATH = process.env.ONEDRIVE_FOLDER_PATH || "/TelegramBot";
+
+// Google OAuth / Drive config
+const GDRIVE_OAUTH_CLIENT_ID = process.env.GDRIVE_OAUTH_CLIENT_ID;
+const GDRIVE_OAUTH_CLIENT_SECRET = process.env.GDRIVE_OAUTH_CLIENT_SECRET;
+const GDRIVE_REDIRECT_URI = process.env.GDRIVE_REDIRECT_URI;
+const GDRIVE_FOLDER_ID = process.env.GDRIVE_FOLDER_ID; // Shared Drive folder ID
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN env var");
@@ -59,6 +66,54 @@ app.use(express.json());
 // Health check
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
+});
+
+// Start Google OAuth flow (visit this URL once in browser)
+app.get("/auth/google", (req, res) => {
+  try {
+    const oAuth2Client = getGoogleOAuthClient();
+
+    const scopes = ["https://www.googleapis.com/auth/drive.file"];
+
+    const url = oAuth2Client.generateAuthUrl({
+      access_type: "offline", // needed for refresh_token
+      prompt: "consent", // force refresh_token each time
+      scope: scopes,
+    });
+
+    res.redirect(url);
+  } catch (err) {
+    console.error("Error starting Google OAuth:", err);
+    res.status(500).send("Failed to start Google OAuth");
+  }
+});
+
+// OAuth2 callback URL configured in Google Cloud (GDRIVE_REDIRECT_URI)
+app.get("/oauth2callback", async (req, res) => {
+  try {
+    const code = req.query.code;
+    if (!code) {
+      return res.status(400).send("Missing code");
+    }
+
+    const oAuth2Client = getGoogleOAuthClient();
+    const { tokens } = await oAuth2Client.getToken(code);
+
+    if (!tokens.refresh_token) {
+      console.error("No refresh_token received:", tokens);
+      return res
+        .status(500)
+        .send(
+          "No refresh token received. Try removing the app from your Google account and re-authenticating."
+        );
+    }
+
+    saveGoogleToken(tokens);
+    res.send("Google Drive connected! You can close this window.");
+  } catch (err) {
+    console.error("Error in OAuth callback:", err);
+    res.status(500).send("OAuth callback failed.");
+  }
 });
 
 // Simple save route to test file writes:
@@ -121,10 +176,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     if (text.toLowerCase().startsWith("/mkdir")) {
       const parts = text.split(" ").filter(Boolean);
       if (parts.length < 2) {
-        await sendTelegramMessage(
-          chatId,
-          "Usage: /mkdir <folder-name>"
-        );
+        await sendTelegramMessage(chatId, "Usage: /mkdir <folder-name>");
         return res.sendStatus(200);
       }
 
@@ -149,8 +201,8 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ---- /upload_onedrive: next file -> OneDrive ----
-    if (text.toLowerCase().startsWith("/upload_onedrive")) {
+    // ---- /uploadonedrive: next file -> OneDrive ----
+    if (text.toLowerCase().startsWith("/uploadonedrive")) {
       uploadTargetByChat.set(chatId, "onedrive");
       await sendTelegramMessage(
         chatId,
@@ -159,8 +211,8 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ---- /upload_gdrive: next file -> Google Drive ----
-    if (text.toLowerCase().startsWith("/upload_gdrive")) {
+    // ---- /uploadgdrive: next file -> Google Drive ----
+    if (text.toLowerCase().startsWith("/uploadgdrive")) {
       uploadTargetByChat.set(chatId, "gdrive");
       await sendTelegramMessage(
         chatId,
@@ -205,8 +257,8 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       text.toLowerCase() === "whats my teachers name?" ||
       text.toLowerCase() === "what's my teachers name?"
     ) {
+      // with new categories, treat as common
       const recalled = recallFromLog("teacher", "common");
-
       if (recalled) {
         await sendTelegramMessage(
           chatId,
@@ -242,10 +294,19 @@ app.post(WEBHOOK_PATH, async (req, res) => {
         }
 
         if (target === "onedrive") {
-          await uploadFileToOneDrive(localPath, path.basename(localPath), chatId, onedriveKind);
+          await uploadFileToOneDrive(
+            localPath,
+            path.basename(localPath),
+            chatId,
+            onedriveKind
+          );
           uploadTargetByChat.delete(chatId);
         } else if (target === "gdrive") {
-          await uploadFileToGoogleDrive(localPath, path.basename(localPath), chatId);
+          await uploadFileToGoogleDrive(
+            localPath,
+            path.basename(localPath),
+            chatId
+          );
           uploadTargetByChat.delete(chatId);
         }
 
@@ -284,10 +345,19 @@ app.post(WEBHOOK_PATH, async (req, res) => {
         }
 
         if (target === "onedrive") {
-          await uploadFileToOneDrive(localPath, path.basename(localPath), chatId, onedriveKind);
+          await uploadFileToOneDrive(
+            localPath,
+            path.basename(localPath),
+            chatId,
+            onedriveKind
+          );
           uploadTargetByChat.delete(chatId);
         } else if (target === "gdrive") {
-          await uploadFileToGoogleDrive(localPath, path.basename(localPath), chatId);
+          await uploadFileToGoogleDrive(
+            localPath,
+            path.basename(localPath),
+            chatId
+          );
           uploadTargetByChat.delete(chatId);
         }
 
@@ -345,7 +415,12 @@ app.post(WEBHOOK_PATH, async (req, res) => {
         ONEDRIVE_USER
       ) {
         // Store logs under Common Files
-        await uploadFileToOneDrive(logFile, "messages.log", chatId, "Common Files/References");
+        await uploadFileToOneDrive(
+          logFile,
+          "messages.log",
+          chatId,
+          "Common Files/References"
+        );
       }
     } catch (err) {
       console.error("Failed to append to log file:", err);
@@ -379,12 +454,18 @@ function categorizeMemory(text) {
 
   // theatre
   if (
-    t.includes("theatre") || t.includes("theater") ||
-    t.includes("script") || t.includes("scene") ||
-    t.includes("monologue") || t.includes("dialogue") ||
-    t.includes("character") || t.includes("role") ||
-    t.includes("blocking") || t.includes("rehearsal") ||
-    t.includes("audition") || t.includes("stage")
+    t.includes("theatre") ||
+    t.includes("theater") ||
+    t.includes("script") ||
+    t.includes("scene") ||
+    t.includes("monologue") ||
+    t.includes("dialogue") ||
+    t.includes("character") ||
+    t.includes("role") ||
+    t.includes("blocking") ||
+    t.includes("rehearsal") ||
+    t.includes("audition") ||
+    t.includes("stage")
   ) {
     return "theatre";
   }
@@ -576,7 +657,12 @@ async function getOneDriveAccessToken() {
 }
 
 // Upload into /TelegramBot/chat_<chatId>/<kind>/
-async function uploadFileToOneDrive(localPath, remoteFileName, chatId, kind = "Common Files/Misc") {
+async function uploadFileToOneDrive(
+  localPath,
+  remoteFileName,
+  chatId,
+  kind = "Common Files/Misc"
+) {
   try {
     if (!ONEDRIVE_USER) {
       throw new Error("ONEDRIVE_USER not set");
@@ -667,12 +753,89 @@ async function createOneDriveFolder(folderName, chatId) {
   }
 }
 
-// ----- Google Drive helper (stub) -----
-// Implement this with googleapis when you're ready
+// ----- Google OAuth / Drive helpers -----
+
+function getGoogleOAuthClient() {
+  if (
+    !GDRIVE_OAUTH_CLIENT_ID ||
+    !GDRIVE_OAUTH_CLIENT_SECRET ||
+    !GDRIVE_REDIRECT_URI
+  ) {
+    throw new Error("Google OAuth env vars not set");
+  }
+
+  return new google.auth.OAuth2(
+    GDRIVE_OAUTH_CLIENT_ID,
+    GDRIVE_OAUTH_CLIENT_SECRET,
+    GDRIVE_REDIRECT_URI
+  );
+}
+
+function getGDriveTokenPath() {
+  return path.join(DATA_DIR, "gdrive_token.json");
+}
+
+function loadSavedGoogleToken() {
+  try {
+    const tokenPath = getGDriveTokenPath();
+    if (!fs.existsSync(tokenPath)) return null;
+    const raw = fs.readFileSync(tokenPath, "utf8");
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("Failed to load Google token:", err);
+    return null;
+  }
+}
+
+function saveGoogleToken(token) {
+  try {
+    const tokenPath = getGDriveTokenPath();
+    fs.writeFileSync(tokenPath, JSON.stringify(token, null, 2), "utf8");
+    console.log("Saved Google token to:", tokenPath);
+  } catch (err) {
+    console.error("Failed to save Google token:", err);
+  }
+}
+
+// ----- Google Drive helper (OAuth-based) -----
 async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId) {
   try {
+    if (!GDRIVE_FOLDER_ID) {
+      throw new Error("GDRIVE_FOLDER_ID not set");
+    }
+
+    const tokens = loadSavedGoogleToken();
+    if (!tokens || !tokens.refresh_token) {
+      console.error("No Google refresh token stored yet.");
+      return;
+    }
+
+    const oAuth2Client = getGoogleOAuthClient();
+    oAuth2Client.setCredentials(tokens);
+
+    const drive = google.drive({ version: "v3", auth: oAuth2Client });
+
+    const fileMetadata = {
+      name: remoteFileName,
+      parents: [GDRIVE_FOLDER_ID], // Shared Drive folder
+    };
+
+    const media = {
+      mimeType: "application/octet-stream",
+      body: fs.createReadStream(localPath),
+    };
+
+    const response = await drive.files.create({
+      requestBody: fileMetadata,
+      media,
+      fields: "id, webViewLink",
+      supportsAllDrives: true,
+    });
+
     console.log(
-      `Stub: would upload ${localPath} as ${remoteFileName} to Google Drive for chat ${chatId}`
+      `Uploaded to Google Drive (chat ${chatId}):`,
+      response.data.id,
+      response.data.webViewLink
     );
   } catch (err) {
     console.error("Failed to upload to Google Drive:", err);
