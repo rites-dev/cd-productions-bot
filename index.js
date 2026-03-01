@@ -35,6 +35,9 @@ if (!PPLX_API_KEY) {
   process.exit(1);
 }
 
+// In‑memory per‑chat upload preference ("onedrive" or "gdrive")
+const uploadTargetByChat = new Map();
+
 // Ensure data directory exists
 try {
   if (!fs.existsSync(DATA_DIR)) {
@@ -77,7 +80,8 @@ app.post("/save", async (req, res) => {
       ONEDRIVE_CLIENT_SECRET &&
       ONEDRIVE_USER
     ) {
-      await uploadFileToOneDrive(filePath, filename, "global", "scripts");
+      // Treat global scripts as common files
+      await uploadFileToOneDrive(filePath, filename, "global", "Common Files/Misc");
     }
 
     return res.status(200).json({ ok: true, path: filePath });
@@ -119,7 +123,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       if (parts.length < 2) {
         await sendTelegramMessage(
           chatId,
-          "Usage: /mkdir <folder_name>"
+          "Usage: /mkdir <folder-name>"
         );
         return res.sendStatus(200);
       }
@@ -142,6 +146,26 @@ app.post(WEBHOOK_PATH, async (req, res) => {
         );
       }
 
+      return res.sendStatus(200);
+    }
+
+    // ---- /upload_onedrive: next file -> OneDrive ----
+    if (text.toLowerCase().startsWith("/upload_onedrive")) {
+      uploadTargetByChat.set(chatId, "onedrive");
+      await sendTelegramMessage(
+        chatId,
+        "Okay, your *next* file or photo will be uploaded to OneDrive (as well as saved locally)."
+      );
+      return res.sendStatus(200);
+    }
+
+    // ---- /upload_gdrive: next file -> Google Drive ----
+    if (text.toLowerCase().startsWith("/upload_gdrive")) {
+      uploadTargetByChat.set(chatId, "gdrive");
+      await sendTelegramMessage(
+        chatId,
+        "Okay, your *next* file or photo will be uploaded to Google Drive (as well as saved locally)."
+      );
       return res.sendStatus(200);
     }
 
@@ -181,7 +205,8 @@ app.post(WEBHOOK_PATH, async (req, res) => {
       text.toLowerCase() === "whats my teachers name?" ||
       text.toLowerCase() === "what's my teachers name?"
     ) {
-      const recalled = recallFromLog("teacher", "people");
+      const recalled = recallFromLog("teacher", "common");
+
       if (recalled) {
         await sendTelegramMessage(
           chatId,
@@ -204,6 +229,26 @@ app.post(WEBHOOK_PATH, async (req, res) => {
 
       try {
         const localPath = await downloadTelegramFile(fileId, originalName, chatId);
+
+        // Decide folder based on last command and (optionally) caption
+        const target = uploadTargetByChat.get(chatId);
+        let onedriveKind = "Common Files/Misc";
+
+        if (message.caption) {
+          const cat = categorizeMemory(message.caption);
+          if (cat === "poems") onedriveKind = "Poems";
+          else if (cat === "theatre") onedriveKind = "Theatre";
+          else onedriveKind = "Common Files/Notes";
+        }
+
+        if (target === "onedrive") {
+          await uploadFileToOneDrive(localPath, path.basename(localPath), chatId, onedriveKind);
+          uploadTargetByChat.delete(chatId);
+        } else if (target === "gdrive") {
+          await uploadFileToGoogleDrive(localPath, path.basename(localPath), chatId);
+          uploadTargetByChat.delete(chatId);
+        }
+
         await sendTelegramMessage(
           chatId,
           `I saved your file as \`${path.basename(localPath)}\` on the server.`
@@ -227,6 +272,25 @@ app.post(WEBHOOK_PATH, async (req, res) => {
 
       try {
         const localPath = await downloadTelegramFile(fileId, originalName, chatId);
+
+        const target = uploadTargetByChat.get(chatId);
+        let onedriveKind = "Common Files/Misc";
+
+        if (message.caption) {
+          const cat = categorizeMemory(message.caption);
+          if (cat === "poems") onedriveKind = "Poems";
+          else if (cat === "theatre") onedriveKind = "Theatre";
+          else onedriveKind = "Common Files/Ideas";
+        }
+
+        if (target === "onedrive") {
+          await uploadFileToOneDrive(localPath, path.basename(localPath), chatId, onedriveKind);
+          uploadTargetByChat.delete(chatId);
+        } else if (target === "gdrive") {
+          await uploadFileToGoogleDrive(localPath, path.basename(localPath), chatId);
+          uploadTargetByChat.delete(chatId);
+        }
+
         await sendTelegramMessage(
           chatId,
           `I saved your photo as \`${path.basename(localPath)}\` on the server.`
@@ -268,7 +332,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     // Log each text question to a file in /data, with category
     try {
       const logFile = path.join(DATA_DIR, "messages.log");
-      const category = categorizeMemory(text);
+      const category = categorizeMemory(text); // poems / theatre / common
       const line = `[${new Date().toISOString()}] chat:${chatId} category:${category} text:${JSON.stringify(
         text
       )}\n`;
@@ -280,7 +344,8 @@ app.post(WEBHOOK_PATH, async (req, res) => {
         ONEDRIVE_CLIENT_SECRET &&
         ONEDRIVE_USER
       ) {
-        await uploadFileToOneDrive(logFile, "messages.log", chatId, "logs");
+        // Store logs under Common Files
+        await uploadFileToOneDrive(logFile, "messages.log", chatId, "Common Files/References");
       }
     } catch (err) {
       console.error("Failed to append to log file:", err);
@@ -293,55 +358,39 @@ app.post(WEBHOOK_PATH, async (req, res) => {
   }
 });
 
-// ----- Very simple memory categorisation -----
+// ----- Memory categorisation: poems / theatre / common -----
 
 function categorizeMemory(text) {
   const t = text.toLowerCase();
 
-  // people / relationships
+  // poems
   if (
-    t.includes("my teacher is") ||
-    t.includes("my friend is") ||
-    t.includes("my mum is") ||
-    t.includes("my mom is") ||
-    t.includes("my dad is") ||
-    t.includes("my brother is") ||
-    t.includes("my sister is")
+    t.includes("poem") ||
+    t.includes("poetry") ||
+    t.includes("haiku") ||
+    t.includes("stanza") ||
+    t.includes("verse") ||
+    t.includes("sonnet") ||
+    t.startsWith("roses are") ||
+    t.includes("write a poem")
   ) {
-    return "people";
+    return "poems";
   }
 
-  // preferences
+  // theatre
   if (
-    t.startsWith("i like ") ||
-    t.startsWith("i love ") ||
-    t.includes("my favourite") ||
-    t.includes("my favorite")
+    t.includes("theatre") || t.includes("theater") ||
+    t.includes("script") || t.includes("scene") ||
+    t.includes("monologue") || t.includes("dialogue") ||
+    t.includes("character") || t.includes("role") ||
+    t.includes("blocking") || t.includes("rehearsal") ||
+    t.includes("audition") || t.includes("stage")
   ) {
-    return "preferences";
+    return "theatre";
   }
 
-  // tasks / reminders
-  if (
-    t.startsWith("remind me ") ||
-    t.startsWith("i need to ") ||
-    t.startsWith("i have to ")
-  ) {
-    return "tasks";
-  }
-
-  // simple factual statements
-  if (
-    t.startsWith("i live ") ||
-    t.startsWith("i am ") ||
-    t.startsWith("i'm ") ||
-    t.includes("my school") ||
-    t.includes("my class")
-  ) {
-    return "facts";
-  }
-
-  return "other";
+  // common (fallback)
+  return "common";
 }
 
 // ----- Very simple memory recall from messages.log -----
@@ -484,15 +533,7 @@ async function downloadTelegramFile(fileId, suggestedName, chatId) {
   fs.writeFileSync(localPath, buffer);
   console.log("Saved Telegram file to:", localPath);
 
-  if (
-    ONEDRIVE_CLIENT_ID &&
-    ONEDRIVE_TENANT_ID &&
-    ONEDRIVE_CLIENT_SECRET &&
-    ONEDRIVE_USER
-  ) {
-    await uploadFileToOneDrive(localPath, safeName, chatId, "scripts");
-  }
-
+  // Upload is now controlled by slash commands in the message handlers
   return localPath;
 }
 
@@ -534,8 +575,8 @@ async function getOneDriveAccessToken() {
   return data.access_token;
 }
 
-// Upload into /TelegramBot/chat_<chatId>/<kind>/<remoteFileName>
-async function uploadFileToOneDrive(localPath, remoteFileName, chatId, kind = "scripts") {
+// Upload into /TelegramBot/chat_<chatId>/<kind>/
+async function uploadFileToOneDrive(localPath, remoteFileName, chatId, kind = "Common Files/Misc") {
   try {
     if (!ONEDRIVE_USER) {
       throw new Error("ONEDRIVE_USER not set");
@@ -548,6 +589,7 @@ async function uploadFileToOneDrive(localPath, remoteFileName, chatId, kind = "s
     const fileBuffer = fs.readFileSync(localPath);
 
     const baseFolder = ONEDRIVE_FOLDER_PATH; // e.g. "/TelegramBot"
+    // kind may be "Poems", "Theatre", or "Common Files/SubFolder"
     const folderPath = `${baseFolder}/chat_${chatId}/${kind}`;
 
     const uploadUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
@@ -580,7 +622,7 @@ async function uploadFileToOneDrive(localPath, remoteFileName, chatId, kind = "s
   }
 }
 
-// Create a OneDrive folder via .keep file under /TelegramBot/chat_<chatId>/<folderName>
+// Create a OneDrive folder via .keep file under /TelegramBot/chat_<chatId>/<folderName>/
 async function createOneDriveFolder(folderName, chatId) {
   try {
     if (!ONEDRIVE_USER) throw new Error("ONEDRIVE_USER not set");
@@ -622,6 +664,18 @@ async function createOneDriveFolder(folderName, chatId) {
   } catch (err) {
     console.error("Failed to create OneDrive folder:", err);
     throw err;
+  }
+}
+
+// ----- Google Drive helper (stub) -----
+// Implement this with googleapis when you're ready
+async function uploadFileToGoogleDrive(localPath, remoteFileName, chatId) {
+  try {
+    console.log(
+      `Stub: would upload ${localPath} as ${remoteFileName} to Google Drive for chat ${chatId}`
+    );
+  } catch (err) {
+    console.error("Failed to upload to Google Drive:", err);
   }
 }
 
